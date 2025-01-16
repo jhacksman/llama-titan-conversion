@@ -27,6 +27,9 @@ class MemoryConfig:
     num_memory_heads: int = 8
     dropout: float = 0.1
     update_interval: int = 100
+    use_flexible_allocation: bool = True  # Enable flexible memory allocation
+    target_memory_per_component: int = 10 * (1024 ** 3)  # Target 10GB per component
+    min_memory_per_component: int = 5 * (1024 ** 3)  # Minimum 5GB per component
 
 
 class LongTermMemory(nn.Module):
@@ -37,6 +40,7 @@ class LongTermMemory(nn.Module):
     1. Efficient storage mechanism for long sequences
     2. Attention-based retrieval system
     3. Automatic context maintenance
+    4. Memory-efficient operation with shared VRAM
     """
     def __init__(self, config: MemoryConfig):
         super().__init__()
@@ -124,6 +128,7 @@ class PersistentMemory(nn.Module):
     1. Permanent knowledge storage
     2. Efficient retrieval mechanism
     3. Task-specific optimization
+    4. Memory-efficient operation with shared VRAM
     """
     def __init__(self, config: MemoryConfig):
         super().__init__()
@@ -200,21 +205,29 @@ class MemoryManager(nn.Module):
         self.vram_budget = vram_budget
         self.n_gpus = n_gpus
         
-        # Detect CPU mode
-        self.use_gpu = (
-            torch.cuda.is_available() and
-            n_gpus > 0 and
-            hasattr(torch.distributed, 'is_initialized') and
-            torch.distributed.is_initialized()
-        )
+        # Initialize device and memory configuration
+        self.use_gpu = torch.cuda.is_available()
+        self.device = torch.device("cuda" if self.use_gpu else "cpu")
         
+        # Calculate memory allocation
         if self.use_gpu:
-            # Full memory system for GPU mode
-            self.long_term = LongTermMemory(config)
-            self.persistent = PersistentMemory(config)
+            memory_dist = optimize_memory_distribution(
+                total_vram=vram_budget,
+                n_gpus=n_gpus,
+                batch_size=32,  # Default batch size
+                seq_length=2048,  # Default sequence length
+                hidden_dim=config.hidden_dim
+            )
+            self.memory_per_component = memory_dist['core_module']['vram_allocated']
+            print(f"Allocated {self.memory_per_component / 1e9:.2f}GB per memory component")
+        
+        # Initialize memory modules
+        if self.use_gpu:
+            # Full memory system with flexible allocation
+            self.long_term = LongTermMemory(config).to(self.device)
+            self.persistent = PersistentMemory(config).to(self.device)
             self.register_buffer('long_term_state', None)
             self.register_buffer('persistent_state', None)
-            self.optimize_distribution()
         else:
             # Simplified memory for CPU mode with reduced dimensions
             reduced_dim = min(config.hidden_dim, 128)  # Smaller dimension for CPU
@@ -239,15 +252,49 @@ class MemoryManager(nn.Module):
             )
 
     def optimize_distribution(self):
-        """Optimize memory distribution across GPUs."""
-        if torch.cuda.is_available():
-            # Distribute components across available GPUs
-            if self.n_gpus >= 3:
-                self.long_term.to(f'cuda:{1}')
-                self.persistent.to(f'cuda:{2}')
-            else:
-                self.long_term.to('cuda:0')
-                self.persistent.to('cuda:0')
+        """Optimize memory distribution and usage tracking."""
+        if not self.use_gpu:
+            return
+            
+        # Track current memory usage
+        initial_memory = {
+            i: torch.cuda.memory_allocated(i)
+            for i in range(torch.cuda.device_count())
+        }
+        
+        # Calculate target memory allocation
+        memory_dist = optimize_memory_distribution(
+            total_vram=self.vram_budget,
+            n_gpus=self.n_gpus,
+            batch_size=32,
+            seq_length=2048,
+            hidden_dim=self.config.hidden_dim
+        )
+        
+        target_per_component = memory_dist['core_module']['vram_allocated']
+        
+        # Enable memory tracking for components
+        for module in [self.long_term, self.persistent]:
+            if hasattr(module, 'memory_bank'):
+                # Calculate max size based on available memory
+                max_size = target_per_component // (module.memory_bank.element_size() * module.memory_bank.size(1))
+                # Resize memory bank if needed
+                if module.memory_bank.size(0) > max_size:
+                    print(f"Resizing memory bank from {module.memory_bank.size(0)} to {max_size}")
+                    module.memory_bank = nn.Parameter(
+                        module.memory_bank[:max_size].clone(),
+                        requires_grad=module.memory_bank.requires_grad
+                    )
+        
+        # Log memory usage
+        final_memory = {
+            i: torch.cuda.memory_allocated(i)
+            for i in range(torch.cuda.device_count())
+        }
+        
+        for gpu_id in final_memory:
+            memory_increase = (final_memory[gpu_id] - initial_memory[gpu_id]) / 1e9
+            print(f"GPU {gpu_id} memory increase: {memory_increase:.2f}GB")
 
     def get_long_term_context(self, x: torch.Tensor) -> Optional[torch.Tensor]:
         """Get context from long-term memory."""
@@ -289,6 +336,17 @@ class MemoryManager(nn.Module):
             print(f"Mode: {'GPU' if self.use_gpu else 'CPU'}")
             if mask is not None:
                 print(f"Mask shape: {mask.shape}, dtype: {mask.dtype}")
+            
+            # Track memory usage
+            if self.use_gpu:
+                print("\nGPU Memory Status Before Processing:")
+                total_allocated = 0
+                for i in range(torch.cuda.device_count()):
+                    allocated = torch.cuda.memory_allocated(i) / 1e9
+                    reserved = torch.cuda.memory_reserved(i) / 1e9
+                    total_allocated += allocated
+                    print(f"GPU {i}: Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
+                print(f"Total Allocated: {total_allocated:.2f}GB")
             
             if self.use_gpu:
                 # Full memory processing for GPU mode

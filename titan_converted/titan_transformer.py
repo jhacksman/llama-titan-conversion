@@ -18,13 +18,27 @@ from .memory_utils import (
     setup_memory_sharding,
     MemoryOptimizer
 )
+from .memory_modules import (
+    MemoryConfig,
+    MemoryManager,
+    LongTermMemory,
+    PersistentMemory
+)
 
 @dataclass
 class TitanConfig:
     """Configuration for Titan-specific parameters."""
-    long_term_memory_size: int = 1000000
-    persistent_memory_size: int = 500000
-    memory_update_interval: int = 100
+    # Memory configuration
+    memory_config: MemoryConfig = MemoryConfig(
+        hidden_dim=4096,
+        max_history_len=1000000,
+        knowledge_dim=4096,
+        num_memory_heads=8,
+        dropout=0.1,
+        update_interval=100
+    )
+    
+    # Hardware configuration
     vram_budget: int = 64 * (1024 ** 3)  # 64GB in bytes
     n_gpus: int = 3
     gpu_memory_ratio: List[float] = [0.34, 0.33, 0.33]  # Distribution across GPUs
@@ -96,6 +110,13 @@ class TitanTransformer(LlamaTransformer):
         super().__init__(params)
         self.titan_config = titan_config or TitanConfig()
         
+        # Initialize memory manager
+        self.memory_manager = MemoryManager(
+            config=self.titan_config.memory_config,
+            vram_budget=self.titan_config.vram_budget,
+            n_gpus=self.titan_config.n_gpus
+        )
+        
         # Initialize memory optimizer
         self.memory_optimizer = MemoryOptimizer(
             total_vram=self.titan_config.vram_budget,
@@ -111,11 +132,6 @@ class TitanTransformer(LlamaTransformer):
                 self.titan_config
             ))
         
-        # TODO: Initialize memory components
-        # - Long-term memory module
-        # - Persistent memory module
-        # - Memory distribution logic
-        
         # Optimize memory usage
         self.memory_optimizer.optimize(self)
 
@@ -124,6 +140,7 @@ class TitanTransformer(LlamaTransformer):
         self,
         tokens: torch.Tensor,
         start_pos: int,
+        task_id: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass through the Titan transformer.
@@ -131,18 +148,17 @@ class TitanTransformer(LlamaTransformer):
         Args:
             tokens: Input token tensor
             start_pos: Starting position
+            task_id: Optional task identifier for memory modules
             
         Returns:
             torch.Tensor: Output logits
         """
-        # TODO: Implement forward pass with memory
-        # 1. Initialize memory contexts
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
-        # 2. Prepare attention mask
+        # Prepare attention mask
         mask = None
         if seqlen > 1:
             mask = torch.full(
@@ -152,20 +168,18 @@ class TitanTransformer(LlamaTransformer):
             )
             mask = torch.triu(mask, diagonal=1)
 
-        # TODO: Initialize memory contexts
-        # - Set up long-term memory state
-        # - Prepare persistent memory access
+        # Process through memory manager
+        h = self.memory_manager.forward(h, mask=mask, task_id=task_id)
         
-        # 3. Process through layers with memory
+        # Process through transformer layers
         for layer in self.layers:
-            # TODO: Update and pass memory contexts
             h = layer(
                 h,
                 start_pos,
                 freqs_cis,
                 mask,
-                # long_term_context=None,  # TODO: Implement
-                # persistent_context=None,  # TODO: Implement
+                long_term_context=h,  # Pass processed memory context
+                persistent_context=h   # Pass processed memory context
             )
 
         h = self.norm(h)

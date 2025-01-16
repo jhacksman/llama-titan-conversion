@@ -16,8 +16,8 @@ from fairscale.nn.model_parallel.initialize import (
     model_parallel_is_initialized,
 )
 
-from llama.model import ModelArgs, Transformer
-from llama.tokenizer import Tokenizer
+from titan_converted.llama.model import ModelArgs, Transformer
+from titan_converted.llama.tokenizer import Tokenizer
 
 Role = Literal["system", "user", "assistant"]
 
@@ -130,7 +130,7 @@ class Llama:
     def generate(
         self,
         prompt_tokens: List[List[int]],
-        max_gen_len: int,
+        max_gen_len: Optional[int] = None,
         temperature: float = 0.6,
         top_p: float = 0.9,
         logprobs: bool = False,
@@ -162,7 +162,9 @@ class Llama:
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= params.max_seq_len
-        total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
+        # Handle max_gen_len
+        effective_max_gen_len = params.max_seq_len - max_prompt_len if max_gen_len is None else max_gen_len
+        total_len = min(params.max_seq_len, effective_max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
@@ -217,10 +219,11 @@ class Llama:
         for i, toks in enumerate(tokens.tolist()):
             # cut to max gen len
             start = 0 if echo else len(prompt_tokens[i])
-            toks = toks[start : len(prompt_tokens[i]) + max_gen_len]
+            end_pos = len(prompt_tokens[i]) + effective_max_gen_len
+            toks = toks[start : end_pos]
             probs = None
             if logprobs:
-                probs = token_logprobs[i][start : len(prompt_tokens[i]) + max_gen_len]
+                probs = token_logprobs[i][start : end_pos]
             # cut to eos tok if any
             if self.tokenizer.eos_id in toks:
                 eos_idx = toks.index(self.tokenizer.eos_id)

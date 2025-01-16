@@ -88,19 +88,35 @@ def optimize_memory_distribution(
         f"exceeds budget ({total_vram / 1e9:.2f}GB)"
     )
     
-    # Distribute across GPUs
+    # Target memory per component (~10GB)
+    target_per_component = 10 * (1024 ** 3)  # 10GB in bytes
+    
+    # Calculate available memory after model and activations
+    available_memory = total_vram - (model_size + activation_size + cache_size)
+    
+    # Check if we have enough memory for target allocation
+    if available_memory >= 3 * target_per_component:
+        memory_per_component = target_per_component
+    else:
+        # Scale down if we don't have enough memory
+        memory_per_component = available_memory // 3
+        print(f"Warning: Reducing memory per component to {memory_per_component / 1e9:.2f}GB")
+    
+    # Use flexible GPU assignment (None means any available GPU)
+    gpu_id = 0 if n_gpus == 1 else None
+    
     return {
         "core_module": {
-            "gpu_id": 0,
-            "vram_allocated": int(model_size * 0.6 + activation_size * 0.4)
+            "gpu_id": gpu_id,
+            "vram_allocated": int(memory_per_component)
         },
         "long_term": {
-            "gpu_id": 1,
-            "vram_allocated": int(long_term_size + activation_size * 0.3)
+            "gpu_id": gpu_id,
+            "vram_allocated": int(memory_per_component)
         },
         "persistent": {
-            "gpu_id": 2,
-            "vram_allocated": int(persistent_size + activation_size * 0.3)
+            "gpu_id": gpu_id,
+            "vram_allocated": int(memory_per_component)
         }
     }
 
@@ -129,7 +145,8 @@ def setup_memory_sharding(
 def calculate_memory_requirements(
     batch_size: int,
     seq_length: int,
-    hidden_size: int
+    hidden_size: int,
+    dtype_size: int = 2  # fp16 = 2 bytes
 ) -> dict:
     """
     Calculate memory requirements for different components.
@@ -138,18 +155,38 @@ def calculate_memory_requirements(
         batch_size: Batch size for processing
         seq_length: Sequence length to process
         hidden_size: Hidden dimension size
+        dtype_size: Size of data type in bytes (default: 2 for fp16)
 
     Returns:
         dict: Memory requirements for each component
     """
-    # TODO: Implement memory calculation
-    # - Consider all components
-    # - Account for gradients
-    # - Include buffer requirements
+    # Core attention memory (Q, K, V projections + attention scores)
+    core_size = (
+        batch_size * seq_length * hidden_size * 4 * dtype_size +  # Q, K, V, O
+        batch_size * seq_length * seq_length * 4  # Attention scores (fp32)
+    )
+    
+    # Long-term memory (memory bank + access mechanisms)
+    long_term_size = (
+        hidden_size * 1000000 * dtype_size +  # Memory bank
+        batch_size * hidden_size * 4 * dtype_size +  # Access mechanisms
+        batch_size * seq_length * hidden_size * dtype_size  # Retrieved context
+    )
+    
+    # Persistent memory (knowledge base + access mechanisms)
+    persistent_size = (
+        hidden_size * 500000 * dtype_size +  # Knowledge base
+        batch_size * hidden_size * 4 * dtype_size +  # Access mechanisms
+        batch_size * seq_length * hidden_size * dtype_size  # Retrieved knowledge
+    )
+    
+    # Account for gradient storage during training
+    gradient_multiplier = 2.0
+    
     return {
-        "core_attention": batch_size * seq_length * hidden_size * 4,
-        "long_term_memory": batch_size * hidden_size * 2,
-        "persistent_memory": hidden_size * 1000000
+        "core_attention": int(core_size * gradient_multiplier),
+        "long_term_memory": int(long_term_size * gradient_multiplier),
+        "persistent_memory": int(persistent_size * gradient_multiplier)
     }
 
 

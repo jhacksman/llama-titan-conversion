@@ -66,26 +66,32 @@ This document outlines the technical approach for converting the LLaMA 7B 3.3 tr
 \end{itemize}
 
 \section{Implementation Strategy}
-\subsection{Memory Distribution Across GPUs}
+\subsection{Memory Distribution Strategy}
 Total VRAM: 64GB across 3x RTX 3090 GPUs
 \begin{itemize}
-    \item GPU 1 (Core Module): $\sim$22GB
+    \item Flexible Memory Allocation:
     \begin{itemize}
-        \item Primary attention mechanisms
-        \item Token embeddings
-        \item Layer normalization
+        \item Each memory component: $\sim$10GB target allocation
+        \item Dynamic scaling based on available VRAM
+        \item Minimum 5GB per component guaranteed
     \end{itemize}
-    \item GPU 2 (Long-term Memory): $\sim$21GB
+    \item Memory Components:
     \begin{itemize}
-        \item Historical context storage
-        \item Retrieval mechanisms
-        \item Cache management
+        \item Core Module: Primary attention and processing
+        \item Long-term Memory: Historical context storage
+        \item Persistent Memory: Task-specific knowledge
     \end{itemize}
-    \item GPU 3 (Persistent Memory): $\sim$21GB
+    \item Resource Sharing:
     \begin{itemize}
-        \item Task-specific knowledge base
-        \item Specialized storage systems
-        \item Integration logic
+        \item Components share available VRAM dynamically
+        \item Automatic resizing based on memory pressure
+        \item Memory usage monitoring and optimization
+    \end{itemize}
+    \item Scaling Strategy:
+    \begin{itemize}
+        \item Flexible component sizing for future expansion
+        \item Memory-efficient operation modes
+        \item Graceful degradation under constraints
     \end{itemize}
 \end{itemize}
 

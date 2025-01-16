@@ -62,16 +62,19 @@ class TitanConfig:
             knowledge_dim=4096,
             num_memory_heads=32,
             dropout=0.1,
-            update_interval=100
+            update_interval=100,
+            use_flexible_allocation=True  # Enable flexible memory allocation
         )
     )
     
     # Hardware configuration
     vram_budget: int = 64 * (1024 ** 3)  # 64GB in bytes
-    n_gpus: int = 3
-    gpu_memory_ratio: List[float] = field(
-        default_factory=lambda: [0.34, 0.33, 0.33]  # Distribution across GPUs
-    )
+    n_gpus: int = 3  # Used for model parallelism, not memory dedication
+    memory_per_component: int = 10 * (1024 ** 3)  # Target 10GB per memory component
+    
+    # Memory scaling configuration
+    allow_memory_scaling: bool = True  # Allow scaling down if VRAM is constrained
+    min_memory_per_component: int = 5 * (1024 ** 3)  # Minimum 5GB per component
 
 
 class TitanTransformerBlock(nn.Module):
@@ -342,9 +345,14 @@ class TitanTransformer(nn.Module):
         
         self.norm = RMSNorm(self.params.dim, eps=self.params.norm_eps)
         
-        # Initialize memory manager
+        # Initialize memory manager with flexible allocation
+        memory_config = self.titan_config.memory_config
+        memory_config.use_flexible_allocation = True
+        memory_config.target_memory_per_component = self.titan_config.memory_per_component
+        memory_config.min_memory_per_component = self.titan_config.min_memory_per_component
+        
         self.memory_manager = MemoryManager(
-            config=self.titan_config.memory_config,
+            config=memory_config,
             vram_budget=self.titan_config.vram_budget,
             n_gpus=self.titan_config.n_gpus if use_model_parallel else 1
         )

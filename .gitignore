@@ -1,1 +1,29 @@
-__pycache__/\n*.pyc\n*.pyo\n*.pyd\n.Python\n*.so\n.pytest_cache/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+
+# Distribution / packaging
+*.egg-info/
+*.egg-info/*
+dist/
+build/
+eggs/
+parts/
+bin/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

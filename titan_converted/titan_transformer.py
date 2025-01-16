@@ -54,10 +54,47 @@ class TitanTransformerBlock(LlamaBlock):
         # Replace standard attention with Titan attention
         self.attention = TitanAttention(args)
         
-        # TODO: Initialize memory components
-        # - Long-term memory interface
-        # - Persistent memory interface
-        # - Memory optimization logic
+        # Memory optimization flags
+        self.checkpoint_core_attention = True
+        self.use_memory_efficient_attention = True
+        self.activation_checkpointing = True
+        
+        # Memory monitoring
+        self.peak_memory = 0
+        self.current_memory = 0
+    
+    def _memory_efficient_attention(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        freqs_cis: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        contexts: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]
+    ) -> torch.Tensor:
+        """Memory-efficient attention implementation."""
+        def _attention_forward():
+            return self.attention(
+                self.attention_norm(x),
+                start_pos,
+                freqs_cis,
+                mask,
+                contexts[0],  # long_term_context
+                contexts[1]   # persistent_context
+            )
+        
+        if self.checkpoint_core_attention:
+            # Use checkpointing to save memory
+            return torch.utils.checkpoint.checkpoint(
+                _attention_forward,
+                use_reentrant=False
+            )
+        return _attention_forward()
+    
+    def _update_memory_stats(self):
+        """Update memory usage statistics."""
+        current = torch.cuda.memory_allocated()
+        self.current_memory = current
+        self.peak_memory = max(self.peak_memory, current)
 
     def forward(
         self,
@@ -82,21 +119,38 @@ class TitanTransformerBlock(LlamaBlock):
         Returns:
             torch.Tensor: Processed tensor with integrated memory
         """
-        # TODO: Implement forward pass
-        # 1. Process through attention with memory
-        h = x + self.attention(
-            self.attention_norm(x),
-            start_pos,
-            freqs_cis,
-            mask,
-            long_term_context,
-            persistent_context
-        )
+        self._update_memory_stats()
         
-        # 2. Apply feed-forward with potential memory updates
-        # TODO: Implement memory-aware feed-forward
-        out = h + self.feed_forward(self.ffn_norm(h))
+        # Process through attention with memory optimization
+        if self.activation_checkpointing:
+            h = x + self._memory_efficient_attention(
+                x,
+                start_pos,
+                freqs_cis,
+                mask,
+                (long_term_context, persistent_context)
+            )
+        else:
+            h = x + self.attention(
+                self.attention_norm(x),
+                start_pos,
+                freqs_cis,
+                mask,
+                long_term_context,
+                persistent_context
+            )
         
+        # Apply feed-forward with memory monitoring
+        if self.activation_checkpointing:
+            out = h + torch.utils.checkpoint.checkpoint(
+                lambda x: self.feed_forward(self.ffn_norm(x)),
+                h,
+                use_reentrant=False
+            )
+        else:
+            out = h + self.feed_forward(self.ffn_norm(h))
+        
+        self._update_memory_stats()
         return out
 
 

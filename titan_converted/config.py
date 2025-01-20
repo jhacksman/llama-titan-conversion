@@ -43,7 +43,7 @@ class MemoryConfig:
 @dataclass
 class MoEConfig:
     """MoE-specific configuration."""
-    num_experts: int = 128
+    num_experts: int = 126  # Divisible by 3 GPUs (42 experts per GPU)
     num_experts_per_token: int = 6
     expert_capacity: int = 128
     expert_dim: int = 4096

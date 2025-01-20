@@ -10,7 +10,7 @@ The configuration ensures efficient VRAM usage across multiple GPUs while mainta
 model performance and supporting extended context windows.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Literal
 import torch
 
@@ -47,9 +47,9 @@ class MemoryConfig:
     precision: Literal["bf16", "fp16", "fp32"] = "bf16"
     
     # Component-specific settings
-    core_module: dict = {}
-    long_term_memory: dict = {}
-    persistent_memory: dict = {}
+    core_module: dict = field(default_factory=dict)
+    long_term_memory: dict = field(default_factory=dict)
+    persistent_memory: dict = field(default_factory=dict)
     
     def __post_init__(self):
         """Initialize component-specific configurations."""

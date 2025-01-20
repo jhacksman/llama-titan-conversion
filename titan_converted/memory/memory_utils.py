@@ -17,7 +17,7 @@ import torch.distributed as dist
 def calculate_memory_requirements(
     batch_size: int,
     seq_length: int,
-    hidden_dim: int,
+    dim: int,
     memory_length: int,
     dtype_size: int = 2  # fp16/bf16 = 2 bytes
 ) -> Dict[str, int]:
@@ -27,7 +27,7 @@ def calculate_memory_requirements(
     Args:
         batch_size: Batch size for processing
         seq_length: Sequence length to process
-        hidden_dim: Hidden dimension size
+        dim: Model dimension size
         memory_length: Length of memory banks
         dtype_size: Size of data type in bytes
     
@@ -36,23 +36,23 @@ def calculate_memory_requirements(
     """
     # Core attention memory
     core_size = (
-        batch_size * seq_length * hidden_dim * 4 * dtype_size +  # Activations
-        hidden_dim * hidden_dim * 4 * dtype_size * 3 +          # QKV projections
-        batch_size * seq_length * hidden_dim * 2 * dtype_size   # KV cache
+        batch_size * seq_length * dim * 4 * dtype_size +  # Activations
+        dim * dim * 4 * dtype_size * 3 +                 # QKV projections
+        batch_size * seq_length * dim * 2 * dtype_size   # KV cache
     )
     
     # Long-term memory
     long_term_size = (
-        hidden_dim * memory_length * dtype_size +              # Memory bank
-        batch_size * hidden_dim * 4 * dtype_size +            # Access mechanisms
-        batch_size * seq_length * hidden_dim * dtype_size     # Retrieved context
+        dim * memory_length * dtype_size +              # Memory bank
+        batch_size * dim * 4 * dtype_size +            # Access mechanisms
+        batch_size * seq_length * dim * dtype_size     # Retrieved context
     )
     
     # Persistent memory
     persistent_size = (
-        hidden_dim * (memory_length // 2) * dtype_size +      # Knowledge base
-        batch_size * hidden_dim * 4 * dtype_size +            # Access mechanisms
-        batch_size * seq_length * hidden_dim * dtype_size     # Retrieved knowledge
+        dim * (memory_length // 2) * dtype_size +      # Knowledge base
+        batch_size * dim * 4 * dtype_size +            # Access mechanisms
+        batch_size * seq_length * dim * dtype_size     # Retrieved knowledge
     )
     
     return {
@@ -87,7 +87,7 @@ def optimize_memory_distribution(
     requirements = calculate_memory_requirements(
         batch_size=batch_size,
         seq_length=seq_length,
-        hidden_dim=config.hidden_dim,
+        dim=config.dim,
         memory_length=config.max_memory_length
     )
     
@@ -103,7 +103,7 @@ def optimize_memory_distribution(
     minimum_per_component = config.vram_minimum_per_component
     
     # Calculate available memory after accounting for shared resources
-    shared_memory = batch_size * seq_length * config.hidden_dim * 4  # Activations
+    shared_memory = batch_size * seq_length * config.dim * 4  # Activations
     available_memory = total_vram - shared_memory
     
     # Distribute remaining memory among components

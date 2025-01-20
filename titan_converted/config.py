@@ -23,21 +23,7 @@ class HardwareConfig:
         self.vram_per_gpu = self.total_vram // self.num_gpus
 
 
-@dataclass
-class MemoryConfig:
-    """Memory-specific configuration."""
-    # Component sizes
-    long_term_mem_size: int = 1_000_000
-    persistent_mem_size: int = 500_000
-    
-    # VRAM allocation (per component)
-    vram_target: int = 10 * (1024 ** 3)  # Target 10GB
-    vram_minimum: int = 5 * (1024 ** 3)  # Minimum 5GB
-    
-    # Memory features
-    use_flash_attention: bool = True
-    use_checkpointing: bool = True
-    precision: Literal["bf16", "fp16", "fp32"] = "bf16"
+from .memory.memory_config import MemoryConfig  # Import the consolidated MemoryConfig
 
 
 @dataclass
@@ -107,8 +93,12 @@ class DeepSeekTitanConfig:
         Raises:
             ValueError: If configuration is invalid
         """
+        # Convert hardware config if needed
+        if isinstance(self.hardware, dict):
+            self.hardware = HardwareConfig(**self.hardware)
+            
         # Validate VRAM budget
-        total_mem_target = self.memory.vram_target * 3  # Three components
+        total_mem_target = self.memory.vram_target_per_component * 3  # Three components
         if total_mem_target > self.hardware.total_vram:
             raise ValueError(
                 f"Memory target ({total_mem_target / 1e9:.2f}GB) "
@@ -135,17 +125,17 @@ class DeepSeekTitanConfig:
     def optimize_for_hardware(self) -> None:
         """Optimize configuration for available hardware."""
         # Adjust memory allocation if needed
-        total_mem_target = self.memory.vram_target * 3
+        total_mem_target = self.memory.vram_target_per_component * 3
         if total_mem_target > self.hardware.total_vram:
             # Scale down memory targets
             scale = self.hardware.total_vram / total_mem_target
-            self.memory.vram_target = int(self.memory.vram_target * scale)
+            self.memory.vram_target_per_component = int(self.memory.vram_target_per_component * scale)
             
             # Ensure minimum requirements
-            if self.memory.vram_target < self.memory.vram_minimum:
+            if self.memory.vram_target_per_component < self.memory.vram_minimum_per_component:
                 raise ValueError(
                     "Cannot meet minimum memory requirements "
-                    f"({self.memory.vram_minimum / 1e9:.2f}GB per component)"
+                    f"({self.memory.vram_minimum_per_component / 1e9:.2f}GB per component)"
                 )
         
         # Enable memory optimization features
@@ -169,19 +159,33 @@ def create_config(**kwargs) -> DeepSeekTitanConfig:
     Returns:
         DeepSeekTitanConfig: Initialized configuration
     """
-    # Use provided configs or create defaults
-    hardware_config = kwargs.get('hardware', HardwareConfig())
-    memory_config = kwargs.get('memory', MemoryConfig())
-    moe_config = kwargs.get('moe', MoEConfig())
-    model_config = kwargs.get('model', ModelConfig())
+    # Convert nested dictionaries to proper config objects
+    if 'hardware' in kwargs:
+        if isinstance(kwargs['hardware'], dict):
+            kwargs['hardware'] = HardwareConfig(**kwargs['hardware'])
+    else:
+        kwargs['hardware'] = HardwareConfig()
+        
+    if 'memory' in kwargs:
+        if isinstance(kwargs['memory'], dict):
+            kwargs['memory'] = MemoryConfig(**kwargs['memory'])
+    else:
+        kwargs['memory'] = MemoryConfig()
+        
+    if 'model' in kwargs:
+        if isinstance(kwargs['model'], dict):
+            kwargs['model'] = ModelConfig(**kwargs['model'])
+    else:
+        kwargs['model'] = ModelConfig()
+        
+    if 'moe' in kwargs:
+        if isinstance(kwargs['moe'], dict):
+            kwargs['moe'] = MoEConfig(**kwargs['moe'])
+    else:
+        kwargs['moe'] = MoEConfig()
     
     # Create main config
-    config = DeepSeekTitanConfig(
-        hardware=hardware_config,
-        memory=memory_config,
-        moe=moe_config,
-        model=model_config
-    )
+    config = DeepSeekTitanConfig(**kwargs)
     
     # Validate and optimize
     config.validate()

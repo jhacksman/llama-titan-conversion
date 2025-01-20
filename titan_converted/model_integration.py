@@ -15,8 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
+from .memory.memory_config import MemoryConfig
 from .memory import (
-    MemoryConfig,
     CoreMemory,
     LongTermMemory,
     PersistentMemory,
@@ -36,7 +36,7 @@ class TitanIntegrationConfig:
     ):
         self.base_config = base_config
         self.memory_config = memory_config or MemoryConfig(
-            hidden_dim=base_config.get('dim', 4096),
+            dim=base_config.get('dim', 4096),
             max_sequence_length=2097152,  # 2M+ context
             num_attention_heads=base_config.get('n_heads', 32),
             vram_target_per_component=10 * (1024 ** 3),  # 10GB target
@@ -72,26 +72,26 @@ class HierarchicalAttention(nn.Module):
         
         # Global attention for cross-chunk relationships
         self.global_query = nn.Linear(
-            config.memory_config.hidden_dim,
-            config.memory_config.hidden_dim
+            config.memory_config.dim,
+            config.memory_config.dim
         )
         self.global_key = nn.Linear(
-            config.memory_config.hidden_dim,
-            config.memory_config.hidden_dim
+            config.memory_config.dim,
+            config.memory_config.dim
         )
         self.global_value = nn.Linear(
-            config.memory_config.hidden_dim,
-            config.memory_config.hidden_dim
+            config.memory_config.dim,
+            config.memory_config.dim
         )
         
         # Output processing
         self.output_proj = nn.Linear(
-            config.memory_config.hidden_dim,
-            config.memory_config.hidden_dim
+            config.memory_config.dim,
+            config.memory_config.dim
         )
         
         # Layer normalization
-        self.norm = nn.LayerNorm(config.memory_config.hidden_dim)
+        self.norm = nn.LayerNorm(config.memory_config.dim)
     
     def forward(
         self,
@@ -108,7 +108,7 @@ class HierarchicalAttention(nn.Module):
         Returns:
             torch.Tensor: Processed tensor with hierarchical attention
         """
-        batch_size, seq_len, hidden_dim = x.shape
+        batch_size, seq_len, dim = x.shape
         
         # Split into chunks
         num_chunks = math.ceil(seq_len / self.chunk_size)
@@ -116,7 +116,7 @@ class HierarchicalAttention(nn.Module):
             batch_size,
             num_chunks,
             -1,
-            hidden_dim
+            dim
         )
         
         # Process each chunk with local attention
@@ -147,7 +147,7 @@ class HierarchicalAttention(nn.Module):
         scores = torch.matmul(
             global_queries,
             global_keys.transpose(-2, -1)
-        ) / math.sqrt(hidden_dim)
+        ) / math.sqrt(dim)
         
         if mask is not None:
             chunk_mask = mask.view(
@@ -165,7 +165,7 @@ class HierarchicalAttention(nn.Module):
         
         # Combine local and global context
         output = self.output_proj(
-            global_context.view(batch_size, -1, hidden_dim)
+            global_context.view(batch_size, -1, dim)
         )
         
         return self.norm(output + x)
@@ -221,7 +221,7 @@ class TitanIntegrationLayer(nn.Module):
         Returns:
             torch.Tensor: Processed tensor with memory context
         """
-        batch_size, seq_len, hidden_dim = x.shape
+        batch_size, seq_len, dim = x.shape
         
         # Process through hierarchical attention for long sequences
         if seq_len > 128 * 1024:  # Beyond 128K tokens
@@ -238,7 +238,7 @@ class TitanIntegrationLayer(nn.Module):
         
         # Combine with MoE output
         combined = torch.cat([memory_out, moe_output], dim=-1)
-        output = nn.Linear(combined.size(-1), hidden_dim)(combined)
+        output = nn.Linear(combined.size(-1), dim)(combined)
         
         return output
 

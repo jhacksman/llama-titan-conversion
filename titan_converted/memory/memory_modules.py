@@ -34,13 +34,13 @@ class CoreMemory(nn.Module):
         self.config = config
         
         # Initialize components
-        self.query = nn.Linear(config.hidden_dim, config.hidden_dim)
-        self.key = nn.Linear(config.hidden_dim, config.hidden_dim)
-        self.value = nn.Linear(config.hidden_dim, config.hidden_dim)
-        self.output = nn.Linear(config.hidden_dim, config.hidden_dim)
+        self.query = nn.Linear(config.dim, config.dim)
+        self.key = nn.Linear(config.dim, config.dim)
+        self.value = nn.Linear(config.dim, config.dim)
+        self.output = nn.Linear(config.dim, config.dim)
         
         # Layer normalization
-        self.norm = nn.LayerNorm(config.hidden_dim)
+        self.norm = nn.LayerNorm(config.dim)
         
         # Optional flash attention
         self.use_flash_attention = config.use_flash_attention
@@ -61,11 +61,16 @@ class CoreMemory(nn.Module):
         """Compute attention scores and apply to values."""
         # Calculate attention scores
         scores = torch.matmul(query, key.transpose(-2, -1))
-        scores = scores / math.sqrt(self.config.hidden_dim)
+        scores = scores / math.sqrt(self.config.dim)
         
         # Apply mask if provided
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+            # Convert and reshape mask for attention scores
+            mask = mask.bool() if not mask.dtype == torch.bool else mask
+            # Create causal attention mask [batch_size, 1, 1, seq_len]
+            attention_mask = mask.unsqueeze(1).unsqueeze(2) if mask is not None else None
+            if attention_mask is not None:
+                scores = scores.masked_fill(~attention_mask, float('-inf'))
         
         # Compute attention weights
         weights = F.softmax(scores, dim=-1)
@@ -84,7 +89,7 @@ class CoreMemory(nn.Module):
         Process input through core memory.
         
         Args:
-            x: Input tensor [batch_size, seq_len, hidden_dim]
+            x: Input tensor [batch_size, seq_len, dim]
             mask: Optional attention mask
             past_key_values: Optional cached key/value states
             
@@ -104,15 +109,22 @@ class CoreMemory(nn.Module):
         value = self.value(x)
         
         # Reshape for attention heads
-        query = query.view(batch_size, seq_len, self.config.num_attention_heads, -1)
-        key = key.view(batch_size, seq_len, self.config.num_attention_heads, -1)
-        value = value.view(batch_size, seq_len, self.config.num_attention_heads, -1)
+        head_dim = self.config.dim // self.config.num_attention_heads
+        query = query.view(batch_size, seq_len, self.config.num_attention_heads, head_dim)
+        key = key.view(batch_size, seq_len, self.config.num_attention_heads, head_dim)
+        value = value.view(batch_size, seq_len, self.config.num_attention_heads, head_dim)
+        
+        # Transpose for attention computation
+        query = query.transpose(1, 2)  # [batch_size, n_heads, seq_len, head_dim]
+        key = key.transpose(1, 2)      # [batch_size, n_heads, seq_len, head_dim]
+        value = value.transpose(1, 2)   # [batch_size, n_heads, seq_len, head_dim]
         
         # Compute attention
         context = self._compute_attention(query, key, value, mask)
         
         # Reshape and project output
-        context = context.contiguous().view(batch_size, seq_len, self.config.hidden_dim)
+        context = context.transpose(1, 2).contiguous()  # [batch_size, seq_len, n_heads, head_dim]
+        context = context.view(batch_size, seq_len, self.config.dim)
         output = self.output(context)
         
         return output, {
@@ -144,17 +156,17 @@ class LongTermMemory(nn.Module):
         )
         
         # Access mechanisms
-        self.query_proj = nn.Linear(config.hidden_dim, config.memory_dim)
+        self.query_proj = nn.Linear(config.dim, config.memory_dim)
         self.key_proj = nn.Linear(config.memory_dim, config.memory_dim)
-        self.value_proj = nn.Linear(config.memory_dim, config.hidden_dim)
+        self.value_proj = nn.Linear(config.memory_dim, config.dim)
         
         # Output processing
-        self.output_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
-        self.layer_norm = nn.LayerNorm(config.hidden_dim)
+        self.output_proj = nn.Linear(config.dim, config.dim)
+        self.layer_norm = nn.LayerNorm(config.dim)
         
         # Update mechanism
         self.update_gate = nn.Linear(
-            config.hidden_dim + config.memory_dim,
+            config.dim + config.memory_dim,
             config.memory_dim
         )
         
@@ -170,7 +182,7 @@ class LongTermMemory(nn.Module):
         Process input through long-term memory.
         
         Args:
-            x: Input tensor [batch_size, seq_len, hidden_dim]
+            x: Input tensor [batch_size, seq_len, dim]
             mask: Optional attention mask
             
         Returns:
@@ -187,14 +199,19 @@ class LongTermMemory(nn.Module):
         keys = self.key_proj(self.memory_bank)
         values = self.value_proj(self.memory_bank)
         
-        # Compute attention scores
+        # Compute attention scores [batch_size, seq_len, memory_len]
         scores = torch.matmul(queries, keys.transpose(0, 1))
         scores = scores / math.sqrt(self.config.memory_dim)
         
         if mask is not None:
-            scores = scores.masked_fill(mask.unsqueeze(-1), float('-inf'))
+            # Convert mask to boolean and expand for memory attention
+            mask = mask.bool() if not mask.dtype == torch.bool else mask
+            # Expand mask for memory length dimension [batch_size, seq_len, 1]
+            attention_mask = mask.unsqueeze(-1) if mask is not None else None
+            if attention_mask is not None:
+                scores = scores.masked_fill(~attention_mask, float('-inf'))
         
-        # Get attention weights and retrieve memories
+        # Get attention weights [batch_size, seq_len, memory_len]
         weights = F.softmax(scores, dim=-1)
         memories = torch.matmul(weights, values)
         
@@ -246,20 +263,20 @@ class PersistentMemory(nn.Module):
         )
         
         # Access mechanisms
-        self.query_proj = nn.Linear(config.hidden_dim, config.memory_dim)
+        self.query_proj = nn.Linear(config.dim, config.memory_dim)
         self.key_proj = nn.Linear(config.memory_dim, config.memory_dim)
-        self.value_proj = nn.Linear(config.memory_dim, config.hidden_dim)
+        self.value_proj = nn.Linear(config.memory_dim, config.dim)
         
         # Integration components
         self.fusion = nn.Linear(
-            config.hidden_dim + config.memory_dim,
-            config.hidden_dim
+            config.dim + config.memory_dim,
+            config.dim
         )
-        self.layer_norm = nn.LayerNorm(config.hidden_dim)
+        self.layer_norm = nn.LayerNorm(config.dim)
         
         # Expert routing
         self.num_experts = config.persistent_memory["num_experts"]
-        self.expert_gate = nn.Linear(config.hidden_dim, self.num_experts)
+        self.expert_gate = nn.Linear(config.dim, self.num_experts)
         
         # Initialize knowledge bank
         nn.init.normal_(self.knowledge_bank, mean=0.0, std=0.02)
@@ -273,7 +290,7 @@ class PersistentMemory(nn.Module):
         Process input through persistent memory.
         
         Args:
-            x: Input tensor [batch_size, seq_len, hidden_dim]
+            x: Input tensor [batch_size, seq_len, dim]
             task_id: Optional task identifier for specialized knowledge
             
         Returns:
@@ -355,7 +372,7 @@ class MemoryManager(nn.Module):
         Process input through memory system.
         
         Args:
-            x: Input tensor [batch_size, seq_len, hidden_dim]
+            x: Input tensor [batch_size, seq_len, dim]
             mask: Optional attention mask
             task_id: Optional task identifier
             
@@ -373,5 +390,21 @@ class MemoryManager(nn.Module):
         # Process through persistent memory
         persistent_out = self.persistent(long_term_out, task_id)
         self.persistent_state = persistent_out.detach()
+        
+        # Track expert routing statistics
+        if hasattr(self.persistent, "expert_gate"):
+            # Track expert usage from gate assignments
+            gate_logits = self.persistent.expert_gate(long_term_out)
+            expert_assignments = gate_logits.argmax(dim=-1)
+            expert_counts = torch.bincount(
+                expert_assignments.flatten(),
+                minlength=self.config.num_memory_experts
+            )
+            self.expert_counts = expert_counts
+            self.routing_stats = {
+                "expert_counts": expert_counts,
+                "total_tokens": long_term_out.size(0) * long_term_out.size(1),
+                "active_experts": (expert_counts > 0).sum().item()
+            }
         
         return persistent_out

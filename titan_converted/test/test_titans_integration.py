@@ -14,10 +14,16 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from ..config import create_config, DeepSeekTitanConfig
+from ..config import (
+    create_config,
+    DeepSeekTitanConfig,
+    ModelConfig,
+    HardwareConfig,
+    MemoryConfig,
+    MoEConfig
+)
 from ..titan_deepseek import create_titan_model, TitanTransformer
 from ..memory import (
-    MemoryConfig,
     CoreMemory,
     LongTermMemory,
     PersistentMemory,
@@ -32,17 +38,17 @@ class TestTitansIntegration(unittest.TestCase):
     def setUpClass(cls):
         """Set up test environment."""
         cls.config = create_config(
-            model={
-                "dim": 4096,
-                "n_layers": 32,
-                "n_heads": 32,
-                "vocab_size": 32000,
-                "max_seq_len": 2097152  # 2M context
-            },
-            hardware={
-                "total_vram": 64 * (1024 ** 3),  # 64GB
-                "num_gpus": 3
-            }
+            model=ModelConfig(
+                dim=4096,
+                n_layers=32,
+                n_heads=32,
+                vocab_size=32000,
+                max_seq_len=2097152  # 2M context
+            ),
+            hardware=HardwareConfig(
+                total_vram=64 * (1024 ** 3),  # 64GB
+                num_gpus=3
+            )
         )
         
         # Create model

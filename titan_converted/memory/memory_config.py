@@ -18,11 +18,16 @@ import torch
 @dataclass
 class MemoryConfig:
     """Configuration parameters for memory modules."""
-    # Model dimensions
+    # Model dimensions for 2M+ context
     dim: int = 4096
     intermediate_dim: int = 11008
     num_attention_heads: int = 32
-    max_sequence_length: int = 2097152
+    max_sequence_length: int = 2097152  # 2M tokens
+    chunk_size: int = 4096  # For hierarchical processing
+    
+    # Extended context settings
+    rope_theta: float = 10000.0  # Base for rotary embeddings
+    rope_scaling: float = 1.0  # For context extension
     
     # Memory-specific parameters
     memory_dim: int = 4096
@@ -36,10 +41,10 @@ class MemoryConfig:
     total_vram_budget: int = 64 * (1024 ** 3)  # Total 64GB VRAM
     num_gpus: int = 3
     
-    # Memory routing
-    num_memory_experts: int = 8
-    num_activated_experts: int = 4
-    routing_algorithm: Literal["topk", "hash", "learned"] = "topk"
+    # Memory attention parameters
+    num_memory_layers: int = 8
+    memory_head_dim: int = 64
+    memory_dropout: float = 0.1
     
     # Optimization
     use_checkpointing: bool = True
@@ -59,7 +64,8 @@ class MemoryConfig:
             self.max_sequence_length = 1024
             self.num_attention_heads = max(1, self.dim // 64)
             self.num_memory_heads = max(1, self.dim // 64)
-            self.num_memory_experts = max(1, self.dim // 128)
+            self.num_memory_layers = max(1, self.dim // 512)
+            self.memory_head_dim = max(32, self.dim // 64)
         
         # Memory dimension should match model dimension
         self.memory_dim = self.dim
@@ -89,7 +95,9 @@ class MemoryConfig:
             "memory_dim": self.memory_dim,
             "num_heads": self.num_memory_heads,
             "max_memory_length": self.max_memory_length // 2,  # Smaller persistent memory
-            "num_experts": self.num_memory_experts
+            "num_layers": self.num_memory_layers,
+            "head_dim": self.memory_head_dim,
+            "dropout": self.memory_dropout
         }
     
     def validate_vram_budget(self) -> bool:
@@ -133,7 +141,9 @@ class MemoryConfig:
                 "memory_dim": self.memory_dim,
                 "num_heads": self.num_memory_heads,
                 "max_memory_length": self.max_memory_length // 2,
-                "num_experts": self.num_memory_experts
+                "num_layers": self.num_memory_layers,
+                "head_dim": self.memory_head_dim,
+                "dropout": self.memory_dropout
             }
             
             # Enable memory-saving features

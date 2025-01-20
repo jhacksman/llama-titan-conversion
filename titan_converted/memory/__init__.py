@@ -2,7 +2,7 @@
 Memory modules for Titans architecture implementation.
 
 This package provides the memory components and utilities for implementing
-the Titans architecture with DeepSeek's MoE-based routing system.
+the Titans architecture with DeepSeek's attention mechanism.
 """
 
 from .memory_config import MemoryConfig

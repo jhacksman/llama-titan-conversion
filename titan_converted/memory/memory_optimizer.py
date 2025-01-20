@@ -2,8 +2,8 @@
 Memory optimization for Titans architecture with DeepSeek integration.
 
 This module implements:
-1. Memory-efficient attention across experts
-2. Load balancing between DeepSeek and Titans
+1. Memory-efficient attention mechanism
+2. Load balancing across memory components
 3. Gradient checkpointing optimization
 4. Dynamic VRAM allocation
 """
@@ -49,9 +49,9 @@ class TitanMemoryOptimizer:
         self.load_threshold = 0.85  # 85% VRAM utilization triggers rebalancing
         self.rebalance_interval = 100  # Steps between rebalancing checks
         
-        # Expert routing configuration
-        self.expert_cache = {}
-        self.expert_stats = {}
+        # Memory tracking configuration
+        self.memory_cache = {}
+        self.memory_stats = {}
     
     def _monitor_memory(self) -> Dict[str, int]:
         """Monitor VRAM usage across GPUs."""
@@ -90,10 +90,10 @@ class TitanMemoryOptimizer:
                 if hasattr(module, "checkpoint_core_attention"):
                     module.checkpoint_core_attention = True
             
-            # Enable for MoE layers
-            if hasattr(module, "moe"):
-                if hasattr(module.moe, "checkpoint_experts"):
-                    module.moe.checkpoint_experts = True
+            # Enable for memory layers
+            if hasattr(module, "memory"):
+                if hasattr(module.memory, "checkpoint_memory"):
+                    module.memory.checkpoint_memory = True
     
     def _optimize_attention(self, model: nn.Module) -> None:
         """Implement memory-efficient attention patterns."""
@@ -106,12 +106,12 @@ class TitanMemoryOptimizer:
             if hasattr(module, "use_memory_efficient_attention"):
                 module.use_memory_efficient_attention = True
     
-    def _balance_expert_load(
+    def _balance_memory_load(
         self,
         model: nn.Module,
         step: int
     ) -> None:
-        """Balance load across experts and memory components."""
+        """Balance load across memory components."""
         if step % self.rebalance_interval != 0:
             return
         
@@ -122,19 +122,16 @@ class TitanMemoryOptimizer:
         )
         
         if max_utilization > self.load_threshold:
-            # Adjust expert routing
+            # Adjust memory allocation
             for module in model.modules():
-                if hasattr(module, "moe"):
-                    # Update routing weights based on load
-                    if hasattr(module.moe, "gate"):
-                        with torch.no_grad():
-                            weights = module.moe.gate.weight.data
-                            # Scale weights by inverse utilization
-                            scale = 1.0 - torch.tensor([
-                                comp["utilization"]
-                                for comp in self.memory_stats["components"].values()
-                            ], device=weights.device)
-                            weights *= scale.unsqueeze(-1)
+                if hasattr(module, "memory"):
+                    # Update memory allocation based on load
+                    with torch.no_grad():
+                        scale = 1.0 - torch.tensor([
+                            comp["utilization"]
+                            for comp in self.memory_stats["components"].values()
+                        ], device=module.memory.device)
+                        module.memory.allocation_scale = scale
     
     def _optimize_memory_access(self, model: nn.Module) -> None:
         """Optimize memory access patterns."""
@@ -176,9 +173,9 @@ class TitanMemoryOptimizer:
         # Optimize memory access patterns
         self._optimize_memory_access(model)
         
-        # Balance expert load if step provided
+        # Balance memory load if step provided
         if step is not None:
-            self._balance_expert_load(model, step)
+            self._balance_memory_load(model, step)
         
         # Verify memory budget
         if stats["peak"] > self.vram_budget:

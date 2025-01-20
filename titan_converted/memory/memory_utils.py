@@ -119,16 +119,13 @@ def optimize_memory_distribution(
     
     return {
         "core_module": {
-            "vram_allocated": int(memory_per_component),
-            "gpu_id": None  # Allow flexible GPU assignment
+            "vram_allocated": int(memory_per_component)  # Share VRAM across GPUs
         },
         "long_term": {
-            "vram_allocated": int(memory_per_component),
-            "gpu_id": None
+            "vram_allocated": int(memory_per_component)
         },
         "persistent": {
-            "vram_allocated": int(memory_per_component),
-            "gpu_id": None
+            "vram_allocated": int(memory_per_component)
         }
     }
 
@@ -168,21 +165,14 @@ class MemoryOptimizer:
                 module.use_flash_attention = True
     
     def _monitor_memory(self) -> None:
-        """Update memory statistics."""
-        for i in range(torch.cuda.device_count()):
-            device = torch.device(f"cuda:{i}")
-            self.memory_stats["allocated"] = max(
-                self.memory_stats["allocated"],
-                torch.cuda.memory_allocated(device)
-            )
-            self.memory_stats["cached"] = max(
-                self.memory_stats["cached"],
-                torch.cuda.memory_reserved(device)
-            )
-            self.memory_stats["peak"] = max(
-                self.memory_stats["peak"],
-                torch.cuda.max_memory_allocated(device)
-            )
+        """Update total memory statistics across all GPUs."""
+        total_allocated = sum(torch.cuda.memory_allocated(i) for i in range(torch.cuda.device_count()))
+        total_cached = sum(torch.cuda.memory_reserved(i) for i in range(torch.cuda.device_count()))
+        total_peak = sum(torch.cuda.max_memory_allocated(i) for i in range(torch.cuda.device_count()))
+        
+        self.memory_stats["allocated"] = total_allocated
+        self.memory_stats["cached"] = total_cached
+        self.memory_stats["peak"] = total_peak
     
     def optimize(self, model: nn.Module) -> nn.Module:
         """

@@ -19,7 +19,7 @@ from ..config import (
     DeepSeekTitanConfig,
     ModelConfig,
     HardwareConfig,
-    MoEConfig
+    MemoryConfig
 )
 from ..memory.memory_config import MemoryConfig
 from ..titan_deepseek import create_titan_model, TitanTransformer
@@ -65,8 +65,7 @@ class TestTitansIntegration(unittest.TestCase):
                 vram_target_per_component=10 * (1024 ** 3),  # 10GB target
                 vram_minimum_per_component=5 * (1024 ** 3),  # 5GB minimum
                 total_vram_budget=64 * (1024 ** 3),  # 64GB total
-                num_gpus=3,
-                num_memory_experts=4  # Reduced for testing
+                num_gpus=3
             )
         )
         
@@ -105,7 +104,7 @@ class TestTitansIntegration(unittest.TestCase):
             )
     
     def test_memory_allocation(self):
-        """Test memory allocation across components."""
+        """Test shared memory allocation across components."""
         if not torch.cuda.is_available():
             self.skipTest("CUDA not available")
         
@@ -132,31 +131,27 @@ class TestTitansIntegration(unittest.TestCase):
                     # Forward pass
                     _ = model(input_ids)
                     
-                    # Check total memory usage
-                    max_memory = torch.cuda.max_memory_allocated()
+                    # Check total memory usage across all GPUs
+                    total_allocated = sum(torch.cuda.memory_allocated(i) 
+                                       for i in range(torch.cuda.device_count()))
+                    
+                    # Verify total memory usage
                     self.assertLess(
-                        max_memory,
+                        total_allocated,
                         self.config.hardware.total_vram,
-                        f"Memory usage ({max_memory/1e9:.2f}GB) exceeds "
+                        f"Total memory usage ({total_allocated/1e9:.2f}GB) exceeds "
                         f"budget ({self.config.hardware.total_vram/1e9:.2f}GB) "
                         f"for batch_size={batch_size}, seq_len={seq_len}"
                     )
                     
-                    # Check per-component allocation
-                    for i in range(torch.cuda.device_count()):
-                        allocated = torch.cuda.memory_allocated(i)
-                        self.assertLess(
-                            allocated,
-                            self.config.memory.vram_target_per_component,
-                            f"Memory on GPU {i} ({allocated/1e9:.2f}GB) exceeds "
-                            f"target ({self.config.memory.vram_target_per_component/1e9:.2f}GB)"
-                        )
-                        self.assertGreater(
-                            allocated,
-                            self.config.memory.vram_minimum_per_component,
-                            f"Memory on GPU {i} ({allocated/1e9:.2f}GB) below "
-                            f"minimum ({self.config.memory.vram_minimum_per_component/1e9:.2f}GB)"
-                        )
+                    # Verify minimum memory requirements (5GB per component)
+                    min_required = self.config.memory.vram_minimum_per_component * 3
+                    self.assertGreater(
+                        total_allocated,
+                        min_required,
+                        f"Total memory usage ({total_allocated/1e9:.2f}GB) below "
+                        f"minimum requirement ({min_required/1e9:.2f}GB)"
+                    )
                     
                     # Reset stats for next test
                     torch.cuda.empty_cache()
@@ -238,7 +233,7 @@ class TestTitansIntegration(unittest.TestCase):
             num_memory_heads=max(1, hidden_dim // 64),
             max_sequence_length=1024,
             max_memory_length=1000,
-            num_memory_experts=max(1, hidden_dim // 128)
+            num_memory_layers=max(1, hidden_dim // 128)
         )
         
         # Test CoreMemory
@@ -335,8 +330,8 @@ class TestTitansIntegration(unittest.TestCase):
             "Flash attention not enabled"
         )
     
-    def test_expert_routing(self):
-        """Test MoE expert routing with memory integration."""
+    def test_memory_stats(self):
+        """Test memory usage and statistics."""
         batch_size = 4
         seq_len = 128
         hidden_dim = self.config.model.dim
@@ -348,40 +343,22 @@ class TestTitansIntegration(unittest.TestCase):
         # Run forward pass through memory manager
         _ = self.memory_manager(x, mask)
         
-        # Verify expert routing statistics
-        self.assertTrue(hasattr(self.memory_manager, "expert_counts"),
-                       "Expert counts not tracked in MemoryManager")
-        self.assertTrue(hasattr(self.memory_manager, "routing_stats"),
-                       "Routing statistics not tracked in MemoryManager")
+        # Verify memory statistics
+        self.assertTrue(hasattr(self.memory_manager, "memory_stats"),
+                       "Memory statistics not tracked in MemoryManager")
         
-        # Check expert utilization
-        expert_counts = self.memory_manager.expert_counts
-        routing_stats = self.memory_manager.routing_stats
-        
-        self.assertEqual(
-            len(expert_counts),
-            self.config.memory.num_memory_experts,
-            "Incorrect number of experts tracked"
-        )
-        
-        # Verify active experts
-        active_experts = (expert_counts > 0).sum().item()
-        self.assertGreater(
-            active_experts,
-            0,
-            "No active experts found"
-        )
-        self.assertLessEqual(
-            active_experts,
-            self.config.memory.num_memory_experts,
-            "More active experts than configured"
-        )
+        # Check memory usage tracking
+        memory_stats = self.memory_manager.memory_stats
+        self.assertIn("memory_usage", memory_stats,
+                     "Memory usage not tracked in statistics")
+        self.assertIn("attention_stats", memory_stats,
+                     "Attention statistics not tracked")
         
         # Verify total tokens processed
         self.assertEqual(
-            routing_stats["total_tokens"],
+            memory_stats["total_tokens"],
             batch_size * seq_len,
-            "Incorrect token count in routing statistics"
+            "Incorrect token count in memory statistics"
         )
 
 

@@ -15,29 +15,23 @@ import torch
 @dataclass
 class HardwareConfig:
     """Hardware-specific configuration."""
-    total_vram: int = 64 * (1024 ** 3)  # 64GB total VRAM
+    total_vram: int = 64 * (1024 ** 3)  # 64GB shared VRAM
     num_gpus: int = 3  # 3x NVIDIA RTX 3090
-    vram_per_gpu: int = field(init=False)
     
     def __post_init__(self):
-        self.vram_per_gpu = self.total_vram // self.num_gpus
+        # Verify minimum VRAM requirements (5GB per component)
+        min_required = 15 * (1024 ** 3)  # 5GB * 3 components
+        if self.total_vram < min_required:
+            raise ValueError(
+                f"Insufficient VRAM: {self.total_vram/1e9:.1f}GB < "
+                f"{min_required/1e9:.1f}GB minimum"
+            )
 
 
 from .memory.memory_config import MemoryConfig  # Import the consolidated MemoryConfig
 
 
-@dataclass
-class MoEConfig:
-    """MoE-specific configuration."""
-    num_experts: int = 126  # Divisible by 3 GPUs (42 experts per GPU)
-    num_experts_per_token: int = 6
-    expert_capacity: int = 128
-    expert_dim: int = 4096
-    expert_stride: int = 2
-    num_expert_groups: int = 2
-    router_aux_loss_coef: float = 0.01
-    z_loss_coef: float = 0.01
-    expert_dropout: float = 0.1
+
 
 
 @dataclass
@@ -58,9 +52,11 @@ class ModelConfig:
     # Activation function
     activation_fn: Literal["gelu", "silu"] = "silu"
     
-    # Position embeddings
-    pos_embedding: Literal["rotary", "alibi", "relative"] = "rotary"
-    rotary_dim: Optional[int] = None
+    # Position embeddings for extended context
+    pos_embedding: Literal["rotary"] = "rotary"  # DeepSeek-R1 uses rotary
+    rope_theta: float = 10000.0  # Base for rotary embeddings
+    rope_scaling: float = 1.0  # For context extension
+    rotary_dim: Optional[int] = None  # Will be set to dim//n_heads
     
     def __post_init__(self):
         if self.rotary_dim is None:
@@ -80,7 +76,6 @@ class DeepSeekTitanConfig:
     """
     hardware: HardwareConfig = field(default_factory=HardwareConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
-    moe: MoEConfig = field(default_factory=MoEConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     
     def validate(self) -> bool:
@@ -105,13 +100,9 @@ class DeepSeekTitanConfig:
                 f"exceeds total VRAM ({self.hardware.total_vram / 1e9:.2f}GB)"
             )
         
-        # Validate expert configuration
-        experts_per_gpu = self.moe.num_experts // self.hardware.num_gpus
-        if experts_per_gpu * self.hardware.num_gpus != self.moe.num_experts:
-            raise ValueError(
-                f"Number of experts ({self.moe.num_experts}) must be "
-                f"divisible by number of GPUs ({self.hardware.num_gpus})"
-            )
+        # Validate memory configuration
+        if not self.memory.validate_vram_budget():
+            self.memory.optimize_for_hardware()
         
         # Validate sequence length
         if self.model.max_seq_len > 2_097_152:  # 2M tokens
@@ -142,11 +133,9 @@ class DeepSeekTitanConfig:
         self.memory.use_checkpointing = True
         self.memory.use_flash_attention = True
         
-        # Adjust expert configuration
-        self.moe.expert_capacity = min(
-            self.moe.expert_capacity,
-            self.model.max_seq_len // self.moe.num_experts
-        )
+        # Adjust memory configuration
+        if not self.memory.validate_vram_budget():
+            self.memory.optimize_for_hardware()
 
 
 def create_config(**kwargs) -> DeepSeekTitanConfig:
@@ -178,12 +167,6 @@ def create_config(**kwargs) -> DeepSeekTitanConfig:
     else:
         kwargs['model'] = ModelConfig()
         
-    if 'moe' in kwargs:
-        if isinstance(kwargs['moe'], dict):
-            kwargs['moe'] = MoEConfig(**kwargs['moe'])
-    else:
-        kwargs['moe'] = MoEConfig()
-    
     # Create main config
     config = DeepSeekTitanConfig(**kwargs)
     

@@ -6,7 +6,7 @@ This module implements the specialized memory components:
 2. Long-term Memory: Neural memory for historical context
 3. Persistent Memory: Task-specific knowledge storage
 
-These modules are designed to work with DeepSeek's MoE architecture
+These modules are designed to work with DeepSeek's architecture
 while respecting VRAM constraints and supporting 2M+ context windows.
 """
 
@@ -26,7 +26,7 @@ class CoreMemory(nn.Module):
     
     This module implements:
     1. Efficient attention for long sequences
-    2. Integration with MoE routing
+    2. Integration with attention mechanism
     3. Memory-optimized operations
     """
     def __init__(self, config: MemoryConfig):
@@ -274,9 +274,10 @@ class PersistentMemory(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(config.dim)
         
-        # Expert routing
-        self.num_experts = config.persistent_memory["num_experts"]
-        self.expert_gate = nn.Linear(config.dim, self.num_experts)
+        # Memory attention
+        self.num_layers = config.persistent_memory["num_layers"]
+        self.head_dim = config.persistent_memory["head_dim"]
+        self.dropout = nn.Dropout(config.persistent_memory["dropout"])
         
         # Initialize knowledge bank
         nn.init.normal_(self.knowledge_bank, mean=0.0, std=0.02)
@@ -298,9 +299,8 @@ class PersistentMemory(nn.Module):
         """
         batch_size, seq_len, _ = x.shape
         
-        # Route to experts
-        gate_logits = self.expert_gate(x)
-        weights = F.softmax(gate_logits, dim=-1)
+        # Process through attention layers
+        x = self.dropout(x)
         
         # Query knowledge base
         queries = self.query_proj(x)
@@ -311,15 +311,11 @@ class PersistentMemory(nn.Module):
         scores = torch.matmul(queries, keys.transpose(0, 1))
         scores = scores / math.sqrt(self.config.memory_dim)
         
-        # Apply task-specific routing if provided
+        # Apply task-specific attention if provided
         if task_id is not None:
-            task_mask = torch.zeros(
-                (batch_size, self.num_experts),
-                device=x.device
-            )
-            task_mask.scatter_(1, task_id.unsqueeze(1), 1)
-            weights = weights * task_mask
-            weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-6)
+            # Scale attention based on task
+            task_scale = F.embedding(task_id, torch.ones(1, self.head_dim, device=x.device))
+            scores = scores * task_scale.unsqueeze(1)
         
         # Retrieve and integrate knowledge
         retrieved = torch.matmul(
@@ -391,20 +387,15 @@ class MemoryManager(nn.Module):
         persistent_out = self.persistent(long_term_out, task_id)
         self.persistent_state = persistent_out.detach()
         
-        # Track expert routing statistics
-        if hasattr(self.persistent, "expert_gate"):
-            # Track expert usage from gate assignments
-            gate_logits = self.persistent.expert_gate(long_term_out)
-            expert_assignments = gate_logits.argmax(dim=-1)
-            expert_counts = torch.bincount(
-                expert_assignments.flatten(),
-                minlength=self.config.num_memory_experts
-            )
-            self.expert_counts = expert_counts
-            self.routing_stats = {
-                "expert_counts": expert_counts,
-                "total_tokens": long_term_out.size(0) * long_term_out.size(1),
-                "active_experts": (expert_counts > 0).sum().item()
+        # Track total memory usage across all GPUs
+        total_vram = sum(torch.cuda.memory_allocated(i) for i in range(torch.cuda.device_count()))
+        self.memory_stats = {
+            "total_tokens": long_term_out.size(0) * long_term_out.size(1),
+            "memory_usage": total_vram,
+            "attention_stats": {
+                "num_layers": self.persistent.num_layers,
+                "head_dim": self.persistent.head_dim
             }
+        }
         
         return persistent_out

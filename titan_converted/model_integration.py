@@ -2,7 +2,7 @@
 Integration layer between DeepSeek-R1 and Titans memory system.
 
 This module handles:
-1. Integration of Titans memory modules with DeepSeek's MoE
+1. Integration of Titans memory modules with DeepSeek
 2. Context window expansion beyond 128K tokens
 3. Hierarchical attention for 2M+ context support
 4. VRAM optimization across multiple GPUs
@@ -173,11 +173,11 @@ class HierarchicalAttention(nn.Module):
 
 class TitanIntegrationLayer(nn.Module):
     """
-    Integration layer that combines DeepSeek's MoE with Titans memory system.
+    Integration layer that combines DeepSeek's attention mechanism with Titans memory system.
     
     This layer:
-    1. Handles routing between experts and memory modules
-    2. Manages context window expansion
+    1. Manages memory and attention integration
+    2. Handles context window expansion
     3. Optimizes VRAM usage
     """
     def __init__(
@@ -187,13 +187,13 @@ class TitanIntegrationLayer(nn.Module):
         super().__init__()
         self.config = config
         
-        # Initialize memory system
+        # Initialize memory system with MLA support
         self.memory_manager = MemoryManager(config.memory_config)
         
-        # Hierarchical attention for long sequences
+        # Hierarchical attention for long sequences (2M+ context)
         self.hierarchical_attention = HierarchicalAttention(config)
         
-        # Memory distribution
+        # Initialize memory distribution with shared VRAM
         self.memory_distribution = optimize_memory_distribution(
             total_vram=config.memory_config.total_vram_budget,
             n_gpus=config.memory_config.num_gpus,
@@ -201,20 +201,22 @@ class TitanIntegrationLayer(nn.Module):
             seq_length=config.memory_config.max_sequence_length,
             config=config.memory_config
         )
+        
+        # Layer normalization for final output
+        self.norm = nn.LayerNorm(config.memory_config.dim)
     
     def forward(
         self,
         x: torch.Tensor,
-        moe_output: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        task_id: Optional[torch.Tensor] = None
+        task_id: Optional[torch.Tensor] = None,
+        ffn_output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Integrate MoE output with Titans memory system.
+        Process input through memory-enhanced attention system.
         
         Args:
-            x: Original input tensor
-            moe_output: Output from MoE layer
+            x: Input tensor
             mask: Optional attention mask
             task_id: Optional task identifier
             
@@ -229,16 +231,23 @@ class TitanIntegrationLayer(nn.Module):
         else:
             hierarchical_out = x
         
-        # Process through memory system
+        # Process through memory system with MLA-style attention
         memory_out = self.memory_manager(
             hierarchical_out,
             mask=mask,
             task_id=task_id
         )
         
-        # Combine with MoE output
-        combined = torch.cat([memory_out, moe_output], dim=-1)
-        output = nn.Linear(combined.size(-1), dim)(combined)
+        # Combine with feed-forward output if provided
+        if ffn_output is not None:
+            memory_out = memory_out + ffn_output
+            
+        # Apply final layer normalization
+        output = F.layer_norm(
+            memory_out,
+            (memory_out.size(-1),),
+            eps=1e-6
+        )
         
         return output
 

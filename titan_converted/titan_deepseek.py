@@ -5,7 +5,7 @@ This module extends DeepSeek's architecture with:
 1. Titans memory system integration
 2. 2M+ context window support
 3. Optimized VRAM distribution
-4. Enhanced MoE routing with memory components
+4. Enhanced attention with memory components
 """
 
 import math
@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from .memory import MemoryConfig
+from .attention import MLA, precompute_freqs_cis
 from .model_integration import (
     TitanIntegrationLayer,
     TitanIntegrationConfig,
@@ -46,39 +47,20 @@ class TitanBlock(nn.Module):
         self.n_heads = base_config.get('n_heads', 32)
         self.head_dim = self.dim // self.n_heads
         
-        # Initialize expert routing
-        self.n_experts = base_config.get('n_routed_experts', 64)
-        self.n_active = base_config.get('n_activated_experts', 6)
-        self.expert_counts = torch.zeros(self.n_experts, dtype=torch.long)
-        
-        # Attention components
-        self.attn = nn.MultiheadAttention(
-            embed_dim=self.dim,
-            num_heads=self.n_heads,
-            dropout=0.1,
-            batch_first=True
+        # Initialize MLA attention
+        self.attn = MLA(
+            config=memory_config or MemoryConfig(
+                dim=self.dim,
+                num_attention_heads=self.n_heads
+            )
         )
         
-        # MoE or FFN based on layer
-        if layer_id < base_config.get('n_dense_layers', 1):
-            self.ffn = nn.Sequential(
-                nn.Linear(self.dim, 4 * self.dim),
-                nn.GELU(),
-                nn.Linear(4 * self.dim, self.dim)
-            )
-        else:
-            # Initialize MoE components
-            self.n_experts = base_config.get('n_routed_experts', 64)
-            self.n_active = base_config.get('n_activated_experts', 6)
-            self.moe = nn.ModuleList([
-                nn.Sequential(
-                    nn.Linear(self.dim, 4 * self.dim),
-                    nn.GELU(),
-                    nn.Linear(4 * self.dim, self.dim)
-                )
-                for _ in range(self.n_experts)
-            ])
-            self.gate = nn.Linear(self.dim, self.n_experts)
+        # Feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(self.dim, 4 * self.dim),
+            nn.GELU(),
+            nn.Linear(4 * self.dim, self.dim)
+        )
         
         # Layer normalization
         self.attn_norm = nn.LayerNorm(self.dim)
@@ -90,32 +72,12 @@ class TitanBlock(nn.Module):
             memory_config=memory_config
         )
     
-    def _route_to_experts(
+    def _process_ffn(
         self,
         x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Route input to top-k experts."""
-        # Compute routing scores
-        scores = self.gate(x)  # [batch_size, seq_len, n_experts]
-        
-        # Select top-k experts
-        top_scores, top_idx = torch.topk(
-            scores,
-            k=self.n_active,
-            dim=-1
-        )
-        
-        # Normalize weights
-        weights = F.softmax(top_scores, dim=-1)
-        
-        # Track expert utilization
-        with torch.no_grad():
-            self.expert_counts = torch.bincount(
-                top_idx.flatten(),
-                minlength=self.n_experts
-            )
-        
-        return weights, top_idx
+    ) -> torch.Tensor:
+        """Process input through feed-forward network."""
+        return self.ffn(x)
     
     def forward(
         self,
@@ -134,43 +96,28 @@ class TitanBlock(nn.Module):
         """
         # Self-attention with memory integration
         attn_out = self.attn_norm(x)
-        attn_out, _ = self.attn(
+        # Compute rotary embeddings for position-aware attention
+        freqs_cis = precompute_freqs_cis(
+            dim=self.dim // self.n_heads,
+            seq_len=attn_out.size(1)
+        )
+        
+        # Process through MLA attention
+        attn_out = self.attn(
             attn_out,
-            attn_out,
-            attn_out,
-            attn_mask=mask,
-            need_weights=False
+            freqs_cis=freqs_cis.to(attn_out.device),
+            mask=mask
         )
         x = x + attn_out
         
-        # FFN or MoE processing
+        # Feed-forward processing
         ffn_out = self.ffn_norm(x)
-        if hasattr(self, 'moe'):
-            # MoE routing
-            weights, expert_idx = self._route_to_experts(ffn_out)
-            
-            # Process through selected experts
-            expert_outputs = []
-            for i in range(self.n_active):
-                expert_input = ffn_out
-                expert_output = torch.zeros_like(ffn_out)
-                
-                # Process each expert's assigned tokens
-                for j in range(self.n_experts):
-                    mask = (expert_idx[..., i] == j).bool()
-                    if torch.any(mask):
-                        expert_output[mask] = self.moe[j](expert_input[mask])
-                
-                expert_outputs.append(expert_output * weights[..., i:i+1])
-            
-            moe_out = sum(expert_outputs)
-        else:
-            moe_out = self.ffn(ffn_out)
+        ffn_out = self._process_ffn(ffn_out)
         
         # Integrate with Titans memory system
         output = self.integration(
             x=x,
-            moe_output=moe_out,
+            ffn_output=ffn_out,
             mask=mask
         )
         
@@ -340,12 +287,13 @@ class TitanTransformer(nn.Module):
             self.norm = nn.LayerNorm(test_dim)
             self.head = nn.Linear(test_dim, self.vocab_size)  # Use consistent vocab size
             
-            # Initialize expert routing for testing
-            if hasattr(self.blocks[0], 'moe'):
-                self.blocks[0].moe.expert_counts = torch.zeros(
-                    self.blocks[0].n_experts,
-                    dtype=torch.long
-                )
+            # Initialize memory tracking for testing
+            if hasattr(self.blocks[0], 'memory_stats'):
+                self.blocks[0].memory_stats = {
+                    'total_tokens': 0,
+                    'memory_usage': 0,
+                    'attention_stats': {}
+                }
     
     def _init_weights(self, module):
         """Initialize weights for transformer components."""

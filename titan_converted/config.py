@@ -169,32 +169,11 @@ def create_config(**kwargs) -> DeepSeekTitanConfig:
     Returns:
         DeepSeekTitanConfig: Initialized configuration
     """
-    # Create default configs
-    hardware_config = HardwareConfig()
-    memory_config = MemoryConfig()
-    moe_config = MoEConfig()
-    model_config = ModelConfig()
-    
-    # Update configs with provided values
-    if 'hardware' in kwargs:
-        for key, value in kwargs['hardware'].items():
-            if hasattr(hardware_config, key):
-                setattr(hardware_config, key, value)
-    
-    if 'memory' in kwargs:
-        for key, value in kwargs['memory'].items():
-            if hasattr(memory_config, key):
-                setattr(memory_config, key, value)
-    
-    if 'moe' in kwargs:
-        for key, value in kwargs['moe'].items():
-            if hasattr(moe_config, key):
-                setattr(moe_config, key, value)
-    
-    if 'model' in kwargs:
-        for key, value in kwargs['model'].items():
-            if hasattr(model_config, key):
-                setattr(model_config, key, value)
+    # Use provided configs or create defaults
+    hardware_config = kwargs.get('hardware', HardwareConfig())
+    memory_config = kwargs.get('memory', MemoryConfig())
+    moe_config = kwargs.get('moe', MoEConfig())
+    model_config = kwargs.get('model', ModelConfig())
     
     # Create main config
     config = DeepSeekTitanConfig(
